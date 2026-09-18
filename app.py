@@ -1,18 +1,19 @@
+from __future__ import annotations
+
 import os
 import json
 import math
 import re
 import sqlite3
+from typing import Optional, List, Dict, Any
 
-import chromadb
 import gradio as gr
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
-from langchain_huggingface import HuggingFaceEmbeddings
 
-# Load local .env if running locally (HF Spaces automatically injects secrets as env vars)
+# Load local .env if present
 load_dotenv()
 
 # =============================================================================
@@ -65,7 +66,7 @@ cur.executemany("INSERT INTO demand VALUES (?,?,?)", [
 ])
 conn.commit()
 
-def fetch_sku(sku_id: str) -> dict | None:
+def fetch_sku(sku_id: str) -> Optional[Dict[str, Any]]:
     row = cur.execute("""
         SELECT i.sku_id, i.sku_name, i.category,
                i.current_stock, i.service_level,
@@ -78,47 +79,49 @@ def fetch_sku(sku_id: str) -> dict | None:
     """, (sku_id,)).fetchone()
     return dict(row) if row else None
 
-def list_skus() -> list[dict]:
+def list_skus() -> List[Dict[str, Any]]:
     return [dict(r) for r in cur.execute(
         "SELECT sku_id, sku_name, category, current_stock FROM inventory ORDER BY sku_id"
     ).fetchall()]
 
 # =============================================================================
-# 2. RAG Knowledge Base
+# 2. Lightweight In-Memory Knowledge Base (Instant Startup, Low RAM)
 # =============================================================================
 
 KB = [
-    ("ss-formula",  "Safety Stock = Z * sqrt(lead_time) * avg_daily_demand. Z=1.28→90%, 1.65→95%, 2.05→98%, 2.33→99%.", {"topic":"formula"}),
-    ("rop-formula", "Reorder Point (ROP) = (avg_daily_demand * lead_time) + safety_stock.",                               {"topic":"formula"}),
-    ("desired",     "Desired Stock = (avg_daily_demand * lead_time) + safety_stock. Reorder qty = max(0, Desired-Current).",{"topic":"formula"}),
-    ("eoq",         "EOQ = sqrt((2 * Annual Demand * Ordering Cost) / Holding Cost).",                                    {"topic":"formula"}),
-    ("electronics", "Electronics: lead times 14-30 days, service level 95-99%, high obsolescence risk.",                  {"topic":"category"}),
-    ("fmcg",        "FMCG: lead times 3-7 days, high steady demand, service level 95-98%.",                               {"topic":"category"}),
-    ("pharma",      "Pharma: lead times 7-21 days, 99%+ service level, strict FIFO and expiry management.",               {"topic":"category"}),
-    ("raw-mat",     "Raw materials: lead times 10-45 days, service level 90-95%.",                                        {"topic":"category"}),
-    ("abc",         "ABC Analysis: A-items need tight control; C-items tolerate bulk ordering.",                           {"topic":"best_practice"}),
-    ("variability", "High demand variability requires more safety stock for the same service level.",                      {"topic":"best_practice"}),
-    ("seasonal",    "Increase safety stock 4-6 weeks before peak season; reduce quickly post-season.",                    {"topic":"best_practice"}),
-    ("supplier-risk","Single-source or long international lead times: add 10-20% risk buffer to safety stock.",           {"topic":"best_practice"}),
-    ("sl-tradeoff", "Raising service level from 95% to 99% roughly doubles safety stock (Z: 1.65→2.33).",                 {"topic":"best_practice"}),
+    ("ss-formula",  "Safety Stock = Z * sqrt(lead_time) * avg_daily_demand. Z=1.28→90%, 1.65→95%, 2.05→98%, 2.33→99%."),
+    ("rop-formula", "Reorder Point (ROP) = (avg_daily_demand * lead_time) + safety_stock."),
+    ("desired",     "Desired Stock = (avg_daily_demand * lead_time) + safety_stock. Reorder qty = max(0, Desired-Current)."),
+    ("eoq",         "EOQ = sqrt((2 * Annual Demand * Ordering Cost) / Holding Cost)."),
+    ("electronics", "Electronics: lead times 14-30 days, service level 95-99%, high obsolescence risk."),
+    ("fmcg",        "FMCG: lead times 3-7 days, high steady demand, service level 95-98%."),
+    ("pharma",      "Pharma: lead times 7-21 days, 99%+ service level, strict FIFO and expiry management."),
+    ("raw-mat",     "Raw materials: lead times 10-45 days, service level 90-95%."),
+    ("abc",         "ABC Analysis: A-items need tight control; C-items tolerate bulk ordering."),
+    ("variability", "High demand variability requires more safety stock for the same service level."),
+    ("seasonal",    "Increase safety stock 4-6 weeks before peak season; reduce quickly post-season."),
+    ("supplier-risk","Single-source or long international lead times: add 10-20% risk buffer to safety stock."),
+    ("sl-tradeoff", "Raising service level from 95% to 99% roughly doubles safety stock (Z: 1.65→2.33)."),
 ]
 
-embed = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    model_kwargs={"device": "cpu"},
-    encode_kwargs={"normalize_embeddings": True},
-)
-
-chroma = chromadb.Client()
-col = chroma.create_collection("inventory_kb", metadata={"hnsw:space": "cosine"})
-vecs = embed.embed_documents([t for _, t, _ in KB])
-col.add(ids=[i for i, _, _ in KB], embeddings=vecs,
-        documents=[t for _, t, _ in KB], metadatas=[m for _, _, m in KB])
+def tokenize(text: str) -> List[str]:
+    return re.findall(r"\w+", text.lower())
 
 def retrieve_context(query: str, n: int = 3) -> str:
-    qv = embed.embed_query(query)
-    res = col.query(query_embeddings=[qv], n_results=n)
-    return "\n".join(f"- {c}" for c in res["documents"][0])
+    query_tokens = set(tokenize(query))
+    scored = []
+    for doc_id, text in KB:
+        doc_tokens = tokenize(text)
+        score = sum(1 for t in doc_tokens if t in query_tokens)
+        scored.append((score, text))
+    
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_docs = [t for s, t in scored[:n] if s > 0]
+    
+    if not top_docs:
+        top_docs = [KB[0][1], KB[1][1], KB[2][1]]
+        
+    return "\n".join(f"- {c}" for c in top_docs)
 
 # =============================================================================
 # 3. Tools
@@ -131,7 +134,7 @@ def db_lookup(sku_id: str) -> dict:
     return record if record else {"error": f"{sku_id} not found. Use list_available_skus to see valid IDs."}
 
 @tool
-def list_available_skus() -> list[dict]:
+def list_available_skus() -> list:
     """Return all SKUs currently in the inventory database."""
     return list_skus()
 
@@ -164,10 +167,7 @@ TOOL_MAP = {t.name: t for t in TOOLS}
 def get_llm():
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise ValueError(
-            "GROQ_API_KEY is not configured. "
-            "Please add GROQ_API_KEY in Space Settings -> Secrets."
-        )
+        raise ValueError("GROQ_API_KEY environment variable is not set.")
     return ChatGroq(model="openai/gpt-oss-120b", temperature=0).bind_tools(TOOLS)
 
 SYSTEM = """You are an inventory planning agent with access to tools and domain knowledge.
@@ -241,4 +241,5 @@ demo = gr.ChatInterface(
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
+    print(f"Starting server on port {port}...")
     demo.launch(server_name="0.0.0.0", server_port=port)
