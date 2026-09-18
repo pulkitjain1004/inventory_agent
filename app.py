@@ -141,7 +141,6 @@ def retrieve_context(query: str, n: int = 3) -> str:
 @tool
 def db_lookup(sku_id: str) -> dict:
     """Fetch cafe inventory, lead-time, supplier, and daily demand parameters for a SKU."""
-    # Sanitize input: only alphanumeric and dashes
     clean_id = re.sub(r"[^A-Za-z0-9\-]", "", sku_id.strip())
     record = fetch_sku(clean_id)
     return record if record else {"error": f"SKU '{clean_id}' not found in database. Type 'list' to view valid items."}
@@ -218,7 +217,6 @@ MAX_AGENT_STEPS = 5
 def run_agent(user_message: str) -> str:
     clean_message = user_message.strip()
     
-    # Guardrail 1: Input Length Restriction
     if len(clean_message) > MAX_INPUT_LENGTH:
         return f"⚠️ **Input too long:** Please limit your query to under {MAX_INPUT_LENGTH} characters."
     if not clean_message:
@@ -232,7 +230,6 @@ def run_agent(user_message: str) -> str:
 
     llm = get_llm()
 
-    # Guardrail 2: Loop Safety Cap (Prevents infinite tool call loops)
     for _ in range(MAX_AGENT_STEPS):
         response = llm.invoke(messages)
         messages.append(response)
@@ -255,7 +252,7 @@ def run_agent(user_message: str) -> str:
     return "⚠️ **Analysis limit reached:** The agent completed the maximum steps. Please try a more specific SKU query."
 
 # =============================================================================
-# 5. Gradio Chat Interface (Ocean Soft Theme)
+# 5. Gradio Chat Interface (Standard Blocks Theme Integration)
 # =============================================================================
 
 custom_theme = gr.themes.Soft(
@@ -275,24 +272,24 @@ def chat_handler(message, _history):
             "Or: **list** to see all coffee & cafe supplies."
         )
 
-demo = gr.ChatInterface(
-    fn=chat_handler,
-    title="RoastOps: Specialty Coffee Roastery & Cafe Supply Planner",
-    description=(
-        "**AI-Powered Coffee & Cafe Logistics Copilot** Real-time bean batch forecasting, "
-        "milk shelf-life buffer analysis, and automated procurement recommendations.\n\n"
-        "💬 *Ask about green beans, roasted coffee, plant milks, packaging, or type **`list`** to inspect the cafe catalog.*"
-    ),
-    theme=custom_theme,
-    examples=[
-        "list",
-        "What is the reorder quantity and runway for SKU-001 (Ethiopian Green Beans)?",
-        "Should we order more Oat Milk (SKU-003)? It's our top selling plant milk.",
-        "Give me a full stock and roast audit for SKU-002 (Colombian Espresso).",
-        "Check stock levels for Whole Milk (SKU-007) and Compostable Cups (SKU-005).",
-        "Which cafe ingredients or beans are at critical risk of stockout?",
-    ],
-)
+with gr.Blocks(theme=custom_theme, title="RoastOps: Specialty Coffee Roastery & Cafe Supply Planner") as demo:
+    gr.ChatInterface(
+        fn=chat_handler,
+        title="RoastOps: Specialty Coffee Roastery & Cafe Supply Planner",
+        description=(
+            "**AI-Powered Coffee & Cafe Logistics Copilot** — Real-time bean batch forecasting, "
+            "milk shelf-life buffer analysis, and automated procurement recommendations.\n\n"
+            "💬 *Ask about green beans, roasted coffee, plant milks, packaging, or type **`list`** to inspect the cafe catalog.*"
+        ),
+        examples=[
+            "list",
+            "What is the reorder quantity and runway for SKU-001 (Ethiopian Green Beans)?",
+            "Should we order more Oat Milk (SKU-003)? It's our top selling plant milk.",
+            "Give me a full stock and roast audit for SKU-002 (Colombian Espresso).",
+            "Check stock levels for Whole Milk (SKU-007) and Compostable Cups (SKU-005).",
+            "Which cafe ingredients or beans are at critical risk of stockout?",
+        ],
+    )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
